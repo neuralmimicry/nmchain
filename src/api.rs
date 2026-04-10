@@ -8,13 +8,138 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
+use tokio::sync::RwLock as AsyncRwLock;
 
 #[derive(Clone)]
 pub struct ApiState {
     pub runtime: Arc<RwLock<ChainRuntime>>,
-    pub tokens: Arc<std::collections::HashMap<String, String>>,
+    pub tokens: Arc<HashMap<String, String>>,
+    pub auth_session_url: Option<String>,
+    pub auth_client: reqwest::Client,
+    pub auth_cache_ttl_ms: u64,
+    pub auth_cache: Arc<AsyncRwLock<HashMap<String, AuthCacheEntry>>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthCacheEntry {
+    actor: Option<String>,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionResponse {
+    authenticated: bool,
+    user: Option<String>,
+}
+
+impl ApiState {
+    fn auth_enabled(&self) -> bool {
+        !self.tokens.is_empty()
+            || self
+                .auth_session_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some()
+    }
+
+    fn negative_cache_ttl_ms(&self) -> u64 {
+        self.auth_cache_ttl_ms.min(2_000).max(250)
+    }
+
+    fn match_static_token(&self, token: &str) -> Option<String> {
+        self.tokens.iter().find_map(|(app, candidate)| {
+            if candidate == token {
+                Some(app.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    async fn cached_actor(&self, token: &str) -> Option<Option<String>> {
+        let now = Instant::now();
+        {
+            let cache = self.auth_cache.read().await;
+            if let Some(entry) = cache.get(token)
+                && entry.expires_at > now
+            {
+                return Some(entry.actor.clone());
+            }
+        }
+        let mut cache = self.auth_cache.write().await;
+        if let Some(entry) = cache.get(token)
+            && entry.expires_at > now
+        {
+            return Some(entry.actor.clone());
+        }
+        cache.remove(token);
+        None
+    }
+
+    async fn cache_actor(&self, token: &str, actor: Option<String>, ttl_ms: u64) {
+        const MAX_CACHE_ENTRIES: usize = 1024;
+
+        let now = Instant::now();
+        let mut cache = self.auth_cache.write().await;
+        cache.retain(|_, entry| entry.expires_at > now);
+        if cache.len() >= MAX_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            token.to_string(),
+            AuthCacheEntry {
+                actor,
+                expires_at: now + std::time::Duration::from_millis(ttl_ms.max(1)),
+            },
+        );
+    }
+
+    async fn validate_central_session(&self, token: &str) -> Result<Option<String>, ()> {
+        let Some(session_url) = self
+            .auth_session_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+
+        let response = self
+            .auth_client
+            .get(session_url)
+            .header("Accept", "application/json")
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|_| ())?;
+
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Ok(None);
+        }
+        if status.is_server_error() || !status.is_success() {
+            return Err(());
+        }
+
+        let payload = response.json::<SessionResponse>().await.map_err(|_| ())?;
+        let user = payload
+            .user
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if payload.authenticated {
+            Ok(user)
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -43,11 +168,8 @@ async fn health(State(state): State<ApiState>) -> impl IntoResponse {
     }))
 }
 
-async fn chain_status(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Response {
-    let app = match authorize(&state, &headers) {
+async fn chain_status(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    let app = match authorize(&state, &headers).await {
         Ok(app) => app,
         Err(response) => return response,
     };
@@ -64,7 +186,7 @@ async fn list_blocks(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
+    if let Err(response) = authorize(&state, &headers).await {
         return response;
     }
     let runtime = state.runtime.read().unwrap();
@@ -77,7 +199,7 @@ async fn get_block(
     headers: HeaderMap,
     Path(index): Path<u64>,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
+    if let Err(response) = authorize(&state, &headers).await {
         return response;
     }
     let runtime = state.runtime.read().unwrap();
@@ -96,17 +218,13 @@ async fn account_snapshot(
     headers: HeaderMap,
     Path((scope, account_id)): Path<(String, String)>,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
+    if let Err(response) = authorize(&state, &headers).await {
         return response;
     }
     let scope = match scope.parse::<AccountScope>() {
         Ok(scope) => scope,
         Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": err })),
-            )
-                .into_response()
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response();
         }
     };
     let runtime = state.runtime.read().unwrap();
@@ -120,17 +238,13 @@ async fn account_ledger(
     Path((scope, account_id)): Path<(String, String)>,
     Query(query): Query<ListQuery>,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
+    if let Err(response) = authorize(&state, &headers).await {
         return response;
     }
     let scope = match scope.parse::<AccountScope>() {
         Ok(scope) => scope,
         Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": err })),
-            )
-                .into_response()
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response();
         }
     };
     let runtime = state.runtime.read().unwrap();
@@ -144,7 +258,7 @@ async fn submit_identity(
     headers: HeaderMap,
     Json(payload): Json<IdentityUpsertRequest>,
 ) -> Response {
-    let app = match authorize(&state, &headers) {
+    let app = match authorize(&state, &headers).await {
         Ok(app) => app,
         Err(response) => return response,
     };
@@ -164,7 +278,7 @@ async fn submit_login(
     headers: HeaderMap,
     Json(payload): Json<LoginObservedRequest>,
 ) -> Response {
-    let app = match authorize(&state, &headers) {
+    let app = match authorize(&state, &headers).await {
         Ok(app) => app,
         Err(response) => return response,
     };
@@ -184,7 +298,7 @@ async fn submit_payment(
     headers: HeaderMap,
     Json(payload): Json<PaymentCaptureRequest>,
 ) -> Response {
-    let app = match authorize(&state, &headers) {
+    let app = match authorize(&state, &headers).await {
         Ok(app) => app,
         Err(response) => return response,
     };
@@ -204,7 +318,7 @@ async fn submit_token(
     headers: HeaderMap,
     Json(payload): Json<TokenMutationRequest>,
 ) -> Response {
-    let app = match authorize(&state, &headers) {
+    let app = match authorize(&state, &headers).await {
         Ok(app) => app,
         Err(response) => return response,
     };
@@ -219,8 +333,8 @@ async fn submit_token(
     }
 }
 
-fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<String, Response> {
-    if state.tokens.is_empty() {
+async fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<String, Response> {
+    if !state.auth_enabled() {
         return Ok("development".to_string());
     }
     let Some(raw_auth) = headers
@@ -240,11 +354,59 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<String, Response> 
         )
             .into_response());
     };
-    for (app, candidate) in state.tokens.iter() {
-        if candidate == token.trim() {
-            return Ok(app.clone());
+    let token = token.trim();
+    if token.is_empty() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "invalid_authorization" })),
+        )
+            .into_response());
+    }
+
+    if let Some(cached) = state.cached_actor(token).await {
+        return cached.ok_or_else(|| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "invalid_token" })),
+            )
+                .into_response()
+        });
+    }
+
+    match state.validate_central_session(token).await {
+        Ok(Some(user)) => {
+            let actor = format!("user:{}", user);
+            state
+                .cache_actor(token, Some(actor.clone()), state.auth_cache_ttl_ms)
+                .await;
+            return Ok(actor);
+        }
+        Ok(None) => {}
+        Err(()) => {
+            if let Some(app) = state.match_static_token(token) {
+                state
+                    .cache_actor(token, Some(app.clone()), state.auth_cache_ttl_ms)
+                    .await;
+                return Ok(app);
+            }
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "auth_unavailable" })),
+            )
+                .into_response());
         }
     }
+
+    if let Some(app) = state.match_static_token(token) {
+        state
+            .cache_actor(token, Some(app.clone()), state.auth_cache_ttl_ms)
+            .await;
+        return Ok(app);
+    }
+
+    state
+        .cache_actor(token, None, state.negative_cache_ttl_ms())
+        .await;
     Err((
         StatusCode::FORBIDDEN,
         Json(json!({ "error": "invalid_token" })),

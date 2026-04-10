@@ -11,6 +11,9 @@ pub struct Settings {
     pub validator_id: String,
     pub validator_key_path: PathBuf,
     pub app_tokens: HashMap<String, String>,
+    pub auth_session_url: Option<String>,
+    pub auth_cache_ttl_ms: u64,
+    pub auth_timeout_ms: u64,
 }
 
 impl Settings {
@@ -29,14 +32,25 @@ impl Settings {
             chain_id: env_string("NMCHAIN_CHAIN_ID", "neuralmimicry-private-chain"),
             validator_id: env_string("NMCHAIN_VALIDATOR_ID", "nm-validator-1"),
             app_tokens: parse_app_tokens(env::var("NMCHAIN_APP_TOKENS").ok()),
+            auth_session_url: env_first(&[
+                "NMCHAIN_AUTH_SESSION_URL",
+                "NMCHAIN_CENTRAL_AUTH_SESSION_URL",
+                "NM_CENTRAL_AUTH_SESSION_URL",
+            ]),
+            auth_cache_ttl_ms: env_u64("NMCHAIN_AUTH_CACHE_TTL_MS", 15_000).clamp(1_000, 300_000),
+            auth_timeout_ms: env_u64("NMCHAIN_AUTH_TIMEOUT_MS", 3_000).clamp(500, 15_000),
             data_dir,
             validator_key_path,
         })
     }
 
     pub fn auth_mode(&self) -> &'static str {
-        if self.app_tokens.is_empty() {
+        if self.app_tokens.is_empty() && self.auth_session_url.is_none() {
             "open"
+        } else if self.auth_session_url.is_some() && !self.app_tokens.is_empty() {
+            "central+bearer"
+        } else if self.auth_session_url.is_some() {
+            "central"
         } else {
             "bearer"
         }
@@ -49,6 +63,22 @@ fn env_string(key: &str, default: &str) -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+fn env_first(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default)
 }
 
 fn parse_app_tokens(raw: Option<String>) -> HashMap<String, String> {
