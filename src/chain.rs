@@ -309,12 +309,16 @@ impl ChainRuntime {
             }
             let expected_state_hash = compute_state_hash(&projection.accounts)?;
             if expected_state_hash != block.state_hash {
-                bail!(
-                    "state hash mismatch at block {}: expected {}, found {}",
-                    block.index,
-                    expected_state_hash,
-                    block.state_hash
-                );
+                let legacy_state_hash = compute_legacy_state_hash(&projection.accounts)?;
+                if legacy_state_hash != block.state_hash {
+                    bail!(
+                        "state hash mismatch at block {}: expected {} (current) or {} (legacy), found {}",
+                        block.index,
+                        expected_state_hash,
+                        legacy_state_hash,
+                        block.state_hash
+                    );
+                }
             }
             blocks.push(block);
         }
@@ -951,6 +955,45 @@ fn compute_state_hash(accounts: &BTreeMap<AccountRef, AccountState>) -> anyhow::
     sha256_json(&stable_accounts)
 }
 
+fn compute_legacy_state_hash(accounts: &BTreeMap<AccountRef, AccountState>) -> anyhow::Result<String> {
+    let stable_accounts = accounts
+        .iter()
+        .map(|(account, state)| {
+            json!({
+                "scope": account.scope,
+                "account_id": account.id,
+                "state": {
+                    "scope": state.scope,
+                    "account_id": state.account_id,
+                    "balance": state.balance,
+                    "paid_balance": state.paid_balance,
+                    "free_balance": state.free_balance,
+                    "reserved": state.reserved,
+                    "last_topup_tokens": state.last_topup_tokens,
+                    "last_topup_at": state.last_topup_at,
+                    "updated_at": state.updated_at,
+                    "spent_total": state.spent_total,
+                    "cashout_total": state.cashout_total,
+                    "shortfall_total": state.shortfall_total,
+                    "free_grant_total": state.free_grant_total,
+                    "reservations": state.reservations,
+                    "identity": {
+                        "role": state.identity.role,
+                        "email": state.identity.email,
+                        "provider": state.identity.provider,
+                        "subject": state.identity.subject,
+                        "last_login_at": state.identity.last_login_at,
+                        "last_login_system": state.identity.last_login_system,
+                        "login_count": state.identity.login_count,
+                        "updated_at": state.identity.updated_at,
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    sha256_json(&stable_accounts)
+}
+
 fn sha256_json<T: Serialize>(value: &T) -> anyhow::Result<String> {
     let bytes = serde_json::to_vec(value).context("failed to serialize value for hashing")?;
     let mut hasher = Sha256::new();
@@ -1033,6 +1076,7 @@ fn reservation_key(meta: &Map<String, Value>, request_id: Option<&str>, tx_id: &
 mod tests {
     use super::*;
     use crate::model::{AccountScope, TokenMutationRequest};
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_settings() -> Settings {
@@ -1052,6 +1096,29 @@ mod tests {
             auth_cache_ttl_ms: 15_000,
             auth_timeout_ms: 3_000,
         }
+    }
+
+    fn write_legacy_identity_chain_fixture(settings: &Settings) {
+        fs::create_dir_all(&settings.data_dir).unwrap();
+        fs::write(
+            &settings.validator_key_path,
+            r#"{
+  "validator_id": "nm-validator-1",
+  "secret_key_hex": "dff9eb49fd0a0e2d943485572e54ea392dcaca175249ae5b7634920e00687b3c",
+  "public_key_hex": "6e28c4d776a8cfb0c7a38bbe02a4bc621b634ef8e4a113d1c4f70fa2d3e6893a",
+  "created_at": "2026-04-01T23:15:09Z"
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            settings.data_dir.join("blocks.jsonl"),
+            concat!(
+                "{\"index\":0,\"chain_id\":\"neuralmimicry-private-chain\",\"ts\":\"2026-04-01T23:15:10Z\",\"previous_hash\":\"GENESIS\",\"transactions_hash\":\"b83317c0afd73de5afce4e993db68292158661ff4c990836c5a9cb83028be4a8\",\"state_hash\":\"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\",\"validator_id\":\"nm-validator-1\",\"validator_public_key\":\"6e28c4d776a8cfb0c7a38bbe02a4bc621b634ef8e4a113d1c4f70fa2d3e6893a\",\"signature_hex\":\"b5148c3d68b58007d682cef7e979c03a7c043953f26999d31a3253c5c09530e116f237175337dece0b3bb8a6363490aa4a6b5bc432e1ded30a8d8e3a28f88a09\",\"hash\":\"acacccf848ac6f8af3cbff988fb335b3ac4c31c56fafe7bceacc600d5d1c7654\",\"transactions\":[{\"tx_id\":\"426c5e0ee9b966e22b1cc11bd53ea77e\",\"request_id\":\"genesis\",\"ts\":\"2026-04-01T23:15:10Z\",\"actor_app\":\"system\",\"event\":{\"event\":\"genesis\",\"chain_id\":\"neuralmimicry-private-chain\",\"validator_id\":\"nm-validator-1\",\"validator_public_key\":\"6e28c4d776a8cfb0c7a38bbe02a4bc621b634ef8e4a113d1c4f70fa2d3e6893a\"}}]}\n",
+                "{\"index\":1,\"chain_id\":\"neuralmimicry-private-chain\",\"ts\":\"2026-04-03T18:26:36Z\",\"previous_hash\":\"acacccf848ac6f8af3cbff988fb335b3ac4c31c56fafe7bceacc600d5d1c7654\",\"transactions_hash\":\"ad59d006572945f278d21032b0bcde91c029ab000db14ad2924568c1140ef8d4\",\"state_hash\":\"012018e27f8bf11d0e22d2e4c459a5323c5b8b8f7ee9ab171a3020c8a0b5324d\",\"validator_id\":\"nm-validator-1\",\"validator_public_key\":\"6e28c4d776a8cfb0c7a38bbe02a4bc621b634ef8e4a113d1c4f70fa2d3e6893a\",\"signature_hex\":\"0bc093682bf35e5099e265795fec70417c330cf215f17f01511fb0d45f369fa4873c98a58e21b4d24491aa988251af9daa2d93887c95c84cfe6c0eb91cc7c40d\",\"hash\":\"c2efd62977c89d93f6bdd858264fb1185e823c15cd80d4fccc9569d3676f3c96\",\"transactions\":[{\"tx_id\":\"18da13c4c1bd2523136f2303b98287ba\",\"request_id\":null,\"ts\":\"2026-04-03T18:26:36Z\",\"actor_app\":\"aarnn\",\"event\":{\"event\":\"identity_upsert\",\"request_id\":null,\"user_id\":\"pbisaacs\",\"role\":\"user\",\"email\":null,\"provider\":\"local\",\"subject\":null,\"meta\":{\"source\":\"signup\"}}}]}\n"
+            ),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1198,5 +1265,67 @@ mod tests {
         assert!(duplicate.duplicate);
         assert_eq!(snapshot.balance, 25);
         assert_eq!(runtime.blocks.len(), 2);
+    }
+
+    #[test]
+    fn load_accepts_legacy_state_hash_fixture() {
+        let mut settings = temp_settings();
+        settings.chain_id = "neuralmimicry-private-chain".to_string();
+        settings.validator_id = "nm-validator-1".to_string();
+        write_legacy_identity_chain_fixture(&settings);
+
+        let runtime = ChainRuntime::load(settings).unwrap();
+        let status = runtime.status();
+        assert_eq!(status.height, 1);
+
+        let snapshot = runtime.account_snapshot(&AccountRef::new(AccountScope::User, "pbisaacs"));
+        let identity = snapshot.identity.expect("identity should be present");
+        assert_eq!(identity.role.as_deref(), Some("user"));
+        assert_eq!(identity.provider.as_deref(), Some("local"));
+        assert!(identity.groups.is_empty());
+        assert_eq!(identity.team_count, 0);
+        assert_eq!(identity.pending_invitation_count, 0);
+    }
+
+    #[test]
+    fn reload_supports_mixed_legacy_and_current_state_hashes() {
+        let mut settings = temp_settings();
+        settings.chain_id = "neuralmimicry-private-chain".to_string();
+        settings.validator_id = "nm-validator-1".to_string();
+        write_legacy_identity_chain_fixture(&settings);
+
+        let mut runtime = ChainRuntime::load(settings.clone()).unwrap();
+        runtime
+            .submit_identity(
+                "customers",
+                IdentityUpsertRequest {
+                    request_id: Some("identity-sync-1".to_string()),
+                    user_id: "pbisaacs".to_string(),
+                    role: Some("admin".to_string()),
+                    email: Some("pbisaacs@neuralmimicry.ai".to_string()),
+                    provider: Some("central".to_string()),
+                    subject: Some("customers:pbisaacs".to_string()),
+                    meta: json!({
+                        "groups": ["admin"],
+                        "active_team": {"team_id": "team-root"},
+                        "team_count": 1,
+                        "pending_invitation_count": 0
+                    }),
+                },
+            )
+            .unwrap();
+        assert_eq!(runtime.status().height, 2);
+        drop(runtime);
+
+        let reloaded = ChainRuntime::load(settings).unwrap();
+        assert_eq!(reloaded.status().height, 2);
+
+        let snapshot = reloaded.account_snapshot(&AccountRef::new(AccountScope::User, "pbisaacs"));
+        let identity = snapshot.identity.expect("identity should be present");
+        assert_eq!(identity.role.as_deref(), Some("admin"));
+        assert_eq!(identity.provider.as_deref(), Some("central"));
+        assert_eq!(identity.groups, vec!["admin".to_string()]);
+        assert_eq!(identity.team_count, 1);
+        assert_eq!(identity.active_team, Some(json!({"team_id": "team-root"})));
     }
 }
