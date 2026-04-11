@@ -384,6 +384,7 @@ fn apply_event(
                 event.subject.clone(),
                 false,
                 None,
+                Some(&event.meta),
                 &now,
             );
             state.updated_at = Some(now);
@@ -404,6 +405,7 @@ fn apply_event(
                 event.session_id.clone(),
                 true,
                 Some(event.system.clone()),
+                Some(&event.meta),
                 &now,
             );
             state.updated_at = Some(now);
@@ -471,10 +473,31 @@ fn update_identity(
     subject: Option<String>,
     is_login: bool,
     system: Option<String>,
+    meta: Option<&Value>,
     now: &str,
 ) {
     if let Some(role) = role.filter(|value| !value.trim().is_empty()) {
         identity.role = Some(role);
+    }
+    if let Some(meta_map) = meta.and_then(Value::as_object) {
+        if let Some(groups) = meta_map.get("groups") {
+            identity.groups = normalize_identity_groups(groups);
+        }
+        if let Some(active_team) = meta_map.get("active_team") {
+            identity.active_team = normalize_active_team(active_team);
+        }
+        if let Some(team_count) = meta_map
+            .get("team_count")
+            .and_then(json_value_as_u64)
+        {
+            identity.team_count = team_count;
+        }
+        if let Some(pending_invitation_count) = meta_map
+            .get("pending_invitation_count")
+            .and_then(json_value_as_u64)
+        {
+            identity.pending_invitation_count = pending_invitation_count;
+        }
     }
     if let Some(email) = email.filter(|value| !value.trim().is_empty()) {
         identity.email = Some(email);
@@ -491,6 +514,67 @@ fn update_identity(
         identity.login_count = identity.login_count.saturating_add(1);
     }
     identity.updated_at = Some(now.to_string());
+}
+
+fn normalize_identity_groups(value: &Value) -> Vec<String> {
+    let mut groups = Vec::new();
+    let mut push_group = |candidate: &str| {
+        let cleaned = candidate.trim().to_ascii_lowercase();
+        if cleaned.is_empty() || groups.iter().any(|existing| existing == &cleaned) {
+            return;
+        }
+        groups.push(cleaned);
+    };
+    match value {
+        Value::String(raw) => {
+            for item in raw.split(',') {
+                push_group(item);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                match item {
+                    Value::String(raw) => push_group(raw),
+                    other => push_group(&other.to_string()),
+                }
+            }
+        }
+        _ => {}
+    }
+    groups
+}
+
+fn normalize_active_team(value: &Value) -> Option<Value> {
+    match value {
+        Value::Object(map) => {
+            let team_id = map
+                .get("team_id")
+                .and_then(Value::as_str)
+                .or_else(|| map.get("id").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|candidate| !candidate.is_empty())?;
+            let mut normalized = map.clone();
+            normalized.insert("team_id".to_string(), Value::String(team_id.to_string()));
+            Some(Value::Object(normalized))
+        }
+        Value::String(raw) => {
+            let team_id = raw.trim();
+            if team_id.is_empty() {
+                None
+            } else {
+                Some(serde_json::json!({ "team_id": team_id }))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn json_value_as_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(raw) => raw.trim().parse::<u64>().ok(),
+        _ => None,
+    }
 }
 
 fn enrich_payment_meta(meta: &Value, event: &PaymentCaptureRequest) -> Value {
@@ -964,6 +1048,9 @@ mod tests {
             validator_id: "validator-test".to_string(),
             validator_key_path: dir.join("validator.key.json"),
             app_tokens: HashMap::new(),
+            auth_session_url: None,
+            auth_cache_ttl_ms: 15_000,
+            auth_timeout_ms: 3_000,
         }
     }
 

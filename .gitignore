@@ -1,1 +1,8 @@
 /target
+data/
+validator.key.json
+.env
+.env.*
+*.log
+.idea/
+.vscode/

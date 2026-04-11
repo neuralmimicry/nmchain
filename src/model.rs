@@ -104,8 +104,13 @@ impl FromStr for TokenEntryType {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IdentityState {
     pub role: Option<String>,
+    pub groups: Vec<String>,
+    pub active_team: Option<Value>,
+    pub team_count: u64,
+    pub pending_invitation_count: u64,
     pub email: Option<String>,
     pub provider: Option<String>,
     pub subject: Option<String>,
