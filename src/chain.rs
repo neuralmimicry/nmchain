@@ -638,6 +638,54 @@ fn apply_token_transition(
                 requested_delta = 0;
             }
         }
+        TokenEntryType::TransferIn => {
+            if requested_delta <= 0 {
+                requested_delta = requested_delta.abs();
+            }
+            let desired = requested_delta.abs();
+            let free_tokens = as_i64(meta.get("free_tokens"))
+                .or_else(|| as_i64(meta.get("free_used")))
+                .unwrap_or(0)
+                .max(0)
+                .min(desired);
+            let paid_tokens = as_i64(meta.get("paid_tokens"))
+                .or_else(|| as_i64(meta.get("paid_used")))
+                .unwrap_or(desired - free_tokens)
+                .max(0)
+                .min(desired - free_tokens);
+            let paid_tokens = paid_tokens + (desired - free_tokens - paid_tokens);
+            new_free += free_tokens;
+            new_paid += paid_tokens;
+            requested_delta = free_tokens + paid_tokens;
+            meta.insert("free_used".to_string(), Value::from(free_tokens));
+            meta.insert("paid_used".to_string(), Value::from(paid_tokens));
+            meta.insert("used_total".to_string(), Value::from(requested_delta));
+        }
+        TokenEntryType::TransferOut => {
+            if requested_delta >= 0 {
+                requested_delta = -requested_delta.abs();
+            }
+            let desired = requested_delta.abs();
+            let available = (new_paid + new_free - state.reserved).max(0);
+            if desired > available {
+                shortfall = desired;
+                meta.insert("shortfall".to_string(), Value::from(shortfall));
+                meta.insert("free_used".to_string(), Value::from(0));
+                meta.insert("paid_used".to_string(), Value::from(0));
+                meta.insert("used_total".to_string(), Value::from(0));
+                requested_delta = 0;
+            } else {
+                let free_used = new_free.min(desired);
+                new_free -= free_used;
+                let remaining = desired - free_used;
+                let paid_used = new_paid.min(remaining);
+                new_paid -= paid_used;
+                meta.insert("free_used".to_string(), Value::from(free_used));
+                meta.insert("paid_used".to_string(), Value::from(paid_used));
+                meta.insert("used_total".to_string(), Value::from(free_used + paid_used));
+                requested_delta = -(free_used + paid_used);
+            }
+        }
         TokenEntryType::Cashout => {
             if requested_delta >= 0 {
                 requested_delta = -requested_delta.abs();
@@ -1172,6 +1220,115 @@ mod tests {
         assert_eq!(snapshot.paid_balance, 30);
         assert_eq!(snapshot.free_balance, 0);
         assert_eq!(snapshot.spent_total, 90);
+    }
+
+    #[test]
+    fn transfer_flow_preserves_composition_and_honors_reservations() {
+        let mut runtime = ChainRuntime::load(temp_settings()).unwrap();
+        runtime
+            .submit_payment(
+                "refiner",
+                PaymentCaptureRequest {
+                    request_id: Some("topup-1".to_string()),
+                    user_id: "alice".to_string(),
+                    tokens: 100,
+                    amount_minor: None,
+                    currency: None,
+                    provider: None,
+                    payment_id: None,
+                    checkout_flow: None,
+                    meta: json!({"source": "portal"}),
+                },
+            )
+            .unwrap();
+        runtime
+            .submit_token(
+                "refiner",
+                TokenMutationRequest {
+                    request_id: Some("grant-1".to_string()),
+                    account_scope: AccountScope::User,
+                    account_id: "alice".to_string(),
+                    entry_type: TokenEntryType::Grant,
+                    delta: 30,
+                    meta: json!({"source": "promo"}),
+                },
+            )
+            .unwrap();
+        runtime
+            .submit_token(
+                "refiner",
+                TokenMutationRequest {
+                    request_id: Some("reserve-1".to_string()),
+                    account_scope: AccountScope::User,
+                    account_id: "alice".to_string(),
+                    entry_type: TokenEntryType::Reserve,
+                    delta: 15,
+                    meta: json!({"reservation_id": "hold-1", "reserved": 15}),
+                },
+            )
+            .unwrap();
+
+        let blocked = runtime
+            .submit_token(
+                "refiner",
+                TokenMutationRequest {
+                    request_id: Some("transfer-out-blocked".to_string()),
+                    account_scope: AccountScope::User,
+                    account_id: "alice".to_string(),
+                    entry_type: TokenEntryType::TransferOut,
+                    delta: -120,
+                    meta: json!({"to_user": "bob"}),
+                },
+            )
+            .unwrap();
+        let blocked_entry = blocked.entry.unwrap();
+        assert_eq!(blocked_entry.delta, 0);
+        assert_eq!(blocked_entry.entry_type, "adjust");
+        assert_eq!(blocked_entry.shortfall, 120);
+
+        let transfer_out = runtime
+            .submit_token(
+                "refiner",
+                TokenMutationRequest {
+                    request_id: Some("transfer-out-1".to_string()),
+                    account_scope: AccountScope::User,
+                    account_id: "alice".to_string(),
+                    entry_type: TokenEntryType::TransferOut,
+                    delta: -90,
+                    meta: json!({"to_user": "bob"}),
+                },
+            )
+            .unwrap();
+        let transfer_out_entry = transfer_out.entry.unwrap();
+        assert_eq!(transfer_out_entry.delta, -90);
+        assert_eq!(transfer_out_entry.entry_type, "transfer_out");
+        assert_eq!(transfer_out_entry.meta["free_used"], 30);
+        assert_eq!(transfer_out_entry.meta["paid_used"], 60);
+
+        runtime
+            .submit_token(
+                "refiner",
+                TokenMutationRequest {
+                    request_id: Some("transfer-in-1".to_string()),
+                    account_scope: AccountScope::User,
+                    account_id: "bob".to_string(),
+                    entry_type: TokenEntryType::TransferIn,
+                    delta: 90,
+                    meta: json!({"from_user": "alice", "free_tokens": 30, "paid_tokens": 60}),
+                },
+            )
+            .unwrap();
+
+        let alice = runtime.account_snapshot(&AccountRef::new(AccountScope::User, "alice"));
+        assert_eq!(alice.balance, 40);
+        assert_eq!(alice.paid_balance, 40);
+        assert_eq!(alice.free_balance, 0);
+        assert_eq!(alice.available, 25);
+
+        let bob = runtime.account_snapshot(&AccountRef::new(AccountScope::User, "bob"));
+        assert_eq!(bob.balance, 90);
+        assert_eq!(bob.paid_balance, 60);
+        assert_eq!(bob.free_balance, 30);
     }
 
     #[test]
