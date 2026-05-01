@@ -56,10 +56,8 @@ impl ChainRuntime {
     pub fn load(settings: Settings) -> anyhow::Result<Self> {
         std::fs::create_dir_all(&settings.data_dir)
             .with_context(|| format!("failed to create '{}'", settings.data_dir.display()))?;
-        let (validator, validator_public_key) = load_or_create_validator(
-            &settings.validator_key_path,
-            &settings.validator_id,
-        )?;
+        let (validator, validator_public_key) =
+            load_or_create_validator(&settings.validator_key_path, &settings.validator_id)?;
         let blocks_path = settings.data_dir.join("blocks.jsonl");
         let mut runtime = Self {
             settings,
@@ -103,7 +101,10 @@ impl ChainRuntime {
     }
 
     pub fn block(&self, index: u64) -> Option<Block> {
-        self.blocks.iter().find(|block| block.index == index).cloned()
+        self.blocks
+            .iter()
+            .find(|block| block.index == index)
+            .cloned()
     }
 
     pub fn account_snapshot(&self, account: &AccountRef) -> AccountSnapshot {
@@ -259,7 +260,8 @@ impl ChainRuntime {
             validator_id: &self.settings.validator_id,
             validator_public_key: &hex::encode(self.validator_public_key.to_bytes()),
         };
-        let header_bytes = serde_json::to_vec(&header).context("failed to serialize block header")?;
+        let header_bytes =
+            serde_json::to_vec(&header).context("failed to serialize block header")?;
         let signature_hex = hex::encode(self.validator.sign(&header_bytes).to_bytes());
         let hash = sha256_json(&json!({
             "header": header,
@@ -374,7 +376,8 @@ fn apply_event(
     match &tx.event {
         ChainEvent::Genesis(_) => {}
         ChainEvent::IdentityUpsert(event) => {
-            let account = AccountRef::new(AccountScope::User, normalize_account_id(&event.user_id)?);
+            let account =
+                AccountRef::new(AccountScope::User, normalize_account_id(&event.user_id)?);
             let state = next
                 .accounts
                 .entry(account.clone())
@@ -395,7 +398,8 @@ fn apply_event(
             snapshot = Some(snapshot_from_state(next.accounts.get(&account), &account));
         }
         ChainEvent::LoginObserved(event) => {
-            let account = AccountRef::new(AccountScope::User, normalize_account_id(&event.user_id)?);
+            let account =
+                AccountRef::new(AccountScope::User, normalize_account_id(&event.user_id)?);
             let state = next
                 .accounts
                 .entry(account.clone())
@@ -405,7 +409,12 @@ fn apply_event(
                 &mut state.identity,
                 None,
                 None,
-                Some(event.auth_mode.clone().unwrap_or_else(|| "session".to_string())),
+                Some(
+                    event
+                        .auth_mode
+                        .clone()
+                        .unwrap_or_else(|| "session".to_string()),
+                ),
                 event.session_id.clone(),
                 true,
                 Some(event.system.clone()),
@@ -416,7 +425,8 @@ fn apply_event(
             snapshot = Some(snapshot_from_state(next.accounts.get(&account), &account));
         }
         ChainEvent::PaymentCaptured(event) => {
-            let account = AccountRef::new(AccountScope::User, normalize_account_id(&event.user_id)?);
+            let account =
+                AccountRef::new(AccountScope::User, normalize_account_id(&event.user_id)?);
             let state = next
                 .accounts
                 .entry(account.clone())
@@ -432,12 +442,18 @@ fn apply_event(
                 event.tokens,
                 meta,
             );
-            next.ledger.entry(account.key()).or_default().push(record.clone());
+            next.ledger
+                .entry(account.key())
+                .or_default()
+                .push(record.clone());
             snapshot = Some(snapshot_from_state(next.accounts.get(&account), &account));
             entry = Some(record);
         }
         ChainEvent::TokenMutation(event) => {
-            let account = AccountRef::new(event.account_scope, normalize_account_id(&event.account_id)?);
+            let account = AccountRef::new(
+                event.account_scope,
+                normalize_account_id(&event.account_id)?,
+            );
             let state = next
                 .accounts
                 .entry(account.clone())
@@ -452,7 +468,10 @@ fn apply_event(
                 event.delta,
                 event.meta.clone(),
             );
-            next.ledger.entry(account.key()).or_default().push(record.clone());
+            next.ledger
+                .entry(account.key())
+                .or_default()
+                .push(record.clone());
             snapshot = Some(snapshot_from_state(next.accounts.get(&account), &account));
             entry = Some(record);
         }
@@ -490,10 +509,7 @@ fn update_identity(
         if let Some(active_team) = meta_map.get("active_team") {
             identity.active_team = normalize_active_team(active_team);
         }
-        if let Some(team_count) = meta_map
-            .get("team_count")
-            .and_then(json_value_as_u64)
-        {
+        if let Some(team_count) = meta_map.get("team_count").and_then(json_value_as_u64) {
             identity.team_count = team_count;
         }
         if let Some(pending_invitation_count) = meta_map
@@ -588,13 +604,28 @@ fn enrich_payment_meta(meta: &Value, event: &PaymentCaptureRequest) -> Value {
     if let Some(amount_minor) = event.amount_minor {
         map.insert("amount_minor".to_string(), Value::from(amount_minor));
     }
-    if let Some(currency) = event.currency.as_ref().filter(|value| !value.trim().is_empty()) {
+    if let Some(currency) = event
+        .currency
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
         map.insert("currency".to_string(), Value::String(currency.clone()));
     }
-    if let Some(provider) = event.provider.as_ref().filter(|value| !value.trim().is_empty()) {
-        map.insert("payment_provider".to_string(), Value::String(provider.clone()));
+    if let Some(provider) = event
+        .provider
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        map.insert(
+            "payment_provider".to_string(),
+            Value::String(provider.clone()),
+        );
     }
-    if let Some(payment_id) = event.payment_id.as_ref().filter(|value| !value.trim().is_empty()) {
+    if let Some(payment_id) = event
+        .payment_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
         map.insert("payment_id".to_string(), Value::String(payment_id.clone()));
     }
     if let Some(checkout_flow) = event
@@ -602,7 +633,10 @@ fn enrich_payment_meta(meta: &Value, event: &PaymentCaptureRequest) -> Value {
         .as_ref()
         .filter(|value| !value.trim().is_empty())
     {
-        map.insert("checkout_flow".to_string(), Value::String(checkout_flow.clone()));
+        map.insert(
+            "checkout_flow".to_string(),
+            Value::String(checkout_flow.clone()),
+        );
     }
     Value::Object(map)
 }
@@ -749,7 +783,8 @@ fn apply_token_transition(
             let balance = state.paid_balance + state.free_balance;
             let target_paid = as_i64(meta.get("target_paid_balance"));
             let target_free = as_i64(meta.get("target_free_balance"));
-            let target_balance = as_i64(meta.get("target_balance")).unwrap_or(balance + requested_delta);
+            let target_balance =
+                as_i64(meta.get("target_balance")).unwrap_or(balance + requested_delta);
             if target_paid.is_some() || target_free.is_some() {
                 if let Some(target_paid) = target_paid {
                     new_paid = target_paid.max(0);
@@ -772,8 +807,10 @@ fn apply_token_transition(
     }
 
     let final_type = if requested_delta == 0
-        && !matches!(entry_type, TokenEntryType::Reserve | TokenEntryType::Release | TokenEntryType::Sync)
-    {
+        && !matches!(
+            entry_type,
+            TokenEntryType::Reserve | TokenEntryType::Release | TokenEntryType::Sync
+        ) {
         TokenEntryType::Adjust
     } else {
         entry_type
@@ -954,7 +991,10 @@ fn verify_block(
     Ok(())
 }
 
-fn load_or_create_validator(path: &Path, validator_id: &str) -> anyhow::Result<(SigningKey, VerifyingKey)> {
+fn load_or_create_validator(
+    path: &Path,
+    validator_id: &str,
+) -> anyhow::Result<(SigningKey, VerifyingKey)> {
     if path.exists() {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read validator file '{}'", path.display()))?;
@@ -1003,7 +1043,9 @@ fn compute_state_hash(accounts: &BTreeMap<AccountRef, AccountState>) -> anyhow::
     sha256_json(&stable_accounts)
 }
 
-fn compute_legacy_state_hash(accounts: &BTreeMap<AccountRef, AccountState>) -> anyhow::Result<String> {
+fn compute_legacy_state_hash(
+    accounts: &BTreeMap<AccountRef, AccountState>,
+) -> anyhow::Result<String> {
     let stable_accounts = accounts
         .iter()
         .map(|(account, state)| {
@@ -1095,7 +1137,9 @@ fn as_i64(value: Option<&Value>) -> Option<i64> {
     if let Some(v) = value.as_u64() {
         return Some(v as i64);
     }
-    value.as_str().and_then(|raw| raw.trim().parse::<i64>().ok())
+    value
+        .as_str()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
 }
 
 fn reservation_key(meta: &Map<String, Value>, request_id: Option<&str>, tx_id: &str) -> String {

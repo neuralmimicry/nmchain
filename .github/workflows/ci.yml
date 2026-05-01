@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.runner_arch }})
+    timeout-minutes: 45
+    runs-on:
+      - self-hosted
+      - Linux
+      - ${{ matrix.runner_arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_arch: [X64, ARM64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+  container:
+    name: Container (${{ matrix.runner_arch }})
+    needs: rust
+    timeout-minutes: 45
+    runs-on:
+      - self-hosted
+      - Linux
+      - ${{ matrix.runner_arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_arch: [X64, ARM64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build container image
+        run: |
+          if command -v podman >/dev/null 2>&1; then
+            podman build -f Containerfile -t nmchain-ci:${{ matrix.runner_arch }} .
+          elif command -v docker >/dev/null 2>&1; then
+            DOCKER_BUILDKIT=0 docker build --pull -f Containerfile -t nmchain-ci:${{ matrix.runner_arch }} .
+          else
+            echo "Neither podman nor docker is available on this runner." >&2
+            exit 1
+          fi
+
+      - name: Remove container image
+        if: always()
+        run: |
+          if command -v podman >/dev/null 2>&1; then
+            podman image rm localhost/nmchain-ci:${{ matrix.runner_arch }} || podman image rm nmchain-ci:${{ matrix.runner_arch }} || true
+          elif command -v docker >/dev/null 2>&1; then
+            docker image rm nmchain-ci:${{ matrix.runner_arch }} || true
+          fi
