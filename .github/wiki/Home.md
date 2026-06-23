@@ -1,0 +1,55 @@
+# nmchain — Wiki Home
+
+**nmchain** is a private, permissioned Rust blockchain service providing a tamper-evident, append-only audit ledger for identity, payment settlement, token minting, reservation, debit, refund, and cash-out records across the NeuralMimicry platform.
+
+> ☕ [Support NeuralMimicry on Crowdfunder](https://www.crowdfunder.co.uk/p/qr/aWggxwPW?utm_campaign=sharemodal&utm_medium=referral&utm_source=shortlink)
+
+---
+
+## Quick navigation
+
+| Page | Description |
+|---|---|
+| [Getting Started](Getting-Started) | Run nmchain locally |
+| [API Reference](API-Reference) | Identity, payment, token mutation, and ledger endpoints |
+| [Block Format](Block-Format) | Signed block structure and replay behaviour |
+| [Configuration](Configuration) | Environment variables reference |
+| [Contributing](Contributing) | Running tests, PR guidelines |
+
+---
+
+## How it works
+
+- Stores an append-only block log in `data/blocks.jsonl`
+- Seals every accepted business event into a signed block (BLAKE3 keyed digest)
+- Replays blocks on startup to rebuild account state
+- Accepts bearer tokens per calling application (`NMCHAIN_APP_TOKENS`)
+
+## Key environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `NMCHAIN_LISTEN` | `127.0.0.1:9080` | Bind address |
+| `NMCHAIN_DATA_DIR` | `data` | Block log directory |
+| `NMCHAIN_CHAIN_ID` | `neuralmimicry-private-chain` | Logical chain identifier |
+| `NMCHAIN_VALIDATOR_ID` | `nm-validator-1` | Local validator identity |
+| `NMCHAIN_APP_TOKENS` | _(open mode)_ | Comma-separated `app=token` pairs |
+
+## Quick start
+
+```bash
+cargo run   # binds 127.0.0.1:9080
+```
+
+If `NMCHAIN_APP_TOKENS` is omitted the API runs in open development mode.
+
+## Supported token operations
+
+`topup`, `grant`, `refund`, `cashout`, `reserve`, `release`, `debit`, `sync`
+
+## Get involved
+
+- 🐛 [Report a bug or request a feature](https://github.com/neuralmimicry/nmchain/issues)
+- 💬 [Join the discussion](https://github.com/neuralmimicry/nmchain/discussions)
+- 📧 Direct support: [info@neuralmimicry.ai](mailto:info@neuralmimicry.ai) · **£1,000/day + VAT**
+- 🌐 [neuralmimicry.ai](https://neuralmimicry.ai)
