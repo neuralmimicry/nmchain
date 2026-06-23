@@ -1,5 +1,13 @@
 # nmchain
 
+## Sponsor NeuralMimicry
+
+`nmchain` is an open-source private permissioned blockchain providing a tamper-evident, append-only audit ledger for identity, payment, and token events across the NeuralMimicry platform. NeuralMimicry is an independent open-source initiative and we rely on community support to sustain this work.
+
+**[☕ Support us on Crowdfunder](https://www.crowdfunder.co.uk/p/qr/aWggxwPW?utm_campaign=sharemodal&utm_medium=referral&utm_source=shortlink)**
+
+---
+
 `nmchain` is a private, permissioned Rust blockchain service for NeuralMimicry account identity, payment settlement, token minting, reservation, debit, refund, and cash-out records.
 
 ## What it does
