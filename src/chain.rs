@@ -1190,6 +1190,12 @@ mod tests {
         }
     }
 
+    // INTENTIONAL TEST VECTOR — this ed25519 key pair was generated solely for this
+    // test fixture and is not used in any production nmchain deployment. Production
+    // instances always generate a fresh key at NMCHAIN_VALIDATOR_KEY_PATH on first start.
+    // The hex values are fixed because the pre-signed blocks in the jsonl fixture below
+    // were created with this exact key; changing either would break signature verification
+    // in the migration compatibility tests.
     fn write_legacy_identity_chain_fixture(settings: &Settings) {
         fs::create_dir_all(&settings.data_dir).unwrap();
         fs::write(
