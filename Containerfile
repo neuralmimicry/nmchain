@@ -1,3 +1,4 @@
+ARG TARGET_PAGE_SIZE=4k
 FROM registry.fedoraproject.org/fedora:42 AS builder
 
 WORKDIR /app
@@ -11,6 +12,8 @@ COPY src ./src
 RUN cargo build --locked --release
 
 FROM registry.fedoraproject.org/fedora-minimal:42 AS runtime
+ARG TARGET_PAGE_SIZE
+LABEL org.opencontainers.image.page-size="${TARGET_PAGE_SIZE}"
 
 RUN microdnf install -y ca-certificates shadow-utils \
     && microdnf clean all
