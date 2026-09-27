@@ -165,6 +165,7 @@ async fn health(State(state): State<ApiState>) -> impl IntoResponse {
     Json(json!({
         "ok": true,
         "chain": runtime.status(),
+        "features": ["atomic_cashout_v1", "idempotent_entry_v1"],
     }))
 }
 

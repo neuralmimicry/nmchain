@@ -187,6 +187,22 @@ impl ChainRuntime {
         let request_key = request_key_for(actor_app, event_request_id(&event));
         if let Some(request_key) = request_key {
             if self.projection.processed_requests.contains(&request_key) {
+                // Retry callers need the original outcome, including shortfall,
+                // before deciding whether an external settlement may proceed.
+                let entry = primary_account.as_ref().and_then(|account| {
+                    self.projection
+                        .ledger
+                        .get(&account.key())
+                        .and_then(|entries| {
+                            entries
+                                .iter()
+                                .find(|entry| {
+                                    entry.actor_app == actor_app
+                                        && entry.request_id.as_deref() == event_request_id(&event)
+                                })
+                                .cloned()
+                        })
+                });
                 let snapshot = primary_account
                     .as_ref()
                     .map(|account| self.account_snapshot(account));
@@ -201,7 +217,7 @@ impl ChainRuntime {
                         .map(|block| block.hash.clone())
                         .unwrap_or_else(|| "GENESIS".to_string()),
                     snapshot,
-                    entry: None,
+                    entry,
                 });
             }
         }
@@ -725,7 +741,19 @@ fn apply_token_transition(
                 requested_delta = -requested_delta.abs();
             }
             let desired = requested_delta.abs();
-            let paid_used = new_paid.min(desired);
+            // Opt-in semantics preserve replay of historical cashouts. Card
+            // refunds must withdraw the entire amount or nothing, respecting
+            // reservations, so a concurrent spend cannot create a partial hold.
+            let require_full = meta
+                .get("require_full_amount")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let available = (new_paid + new_free - state.reserved).max(0);
+            let paid_used = if require_full && (desired > new_paid || desired > available) {
+                0
+            } else {
+                new_paid.min(desired)
+            };
             new_paid -= paid_used;
             shortfall = desired - paid_used;
             if shortfall > 0 {
@@ -1470,8 +1498,114 @@ mod tests {
             .unwrap();
         let snapshot = runtime.account_snapshot(&AccountRef::new(AccountScope::User, "alice"));
         assert!(duplicate.duplicate);
+        assert_eq!(duplicate.entry.unwrap().delta, 25);
         assert_eq!(snapshot.balance, 25);
         assert_eq!(runtime.blocks.len(), 2);
+    }
+
+    #[test]
+    fn card_refund_cashout_is_atomic_and_respects_reserved_tokens() {
+        let settings = temp_settings();
+        let mut runtime = ChainRuntime::load(settings.clone()).unwrap();
+        let mutation = |id: &str, kind, delta, meta| TokenMutationRequest {
+            request_id: Some(id.to_string()),
+            account_scope: AccountScope::User,
+            account_id: "alice".to_string(),
+            entry_type: kind,
+            delta,
+            meta,
+        };
+        runtime
+            .submit_token(
+                "billing",
+                mutation("paid", TokenEntryType::Topup, 100, json!({})),
+            )
+            .unwrap();
+        runtime
+            .submit_token(
+                "billing",
+                mutation(
+                    "hold",
+                    TokenEntryType::Reserve,
+                    0,
+                    json!({"reserved": 20, "reservation_id": "job"}),
+                ),
+            )
+            .unwrap();
+        let blocked = runtime
+            .submit_token(
+                "billing",
+                mutation(
+                    "refund-blocked",
+                    TokenEntryType::Cashout,
+                    -100,
+                    json!({"require_full_amount": true}),
+                ),
+            )
+            .unwrap();
+        assert_eq!(blocked.entry.unwrap().delta, 0);
+        assert_eq!(
+            runtime
+                .account_snapshot(&AccountRef::new(AccountScope::User, "alice"))
+                .paid_balance,
+            100
+        );
+        let insufficient = runtime
+            .submit_token(
+                "billing",
+                mutation(
+                    "too-much",
+                    TokenEntryType::Cashout,
+                    -101,
+                    json!({"require_full_amount": true}),
+                ),
+            )
+            .unwrap();
+        assert_eq!(insufficient.entry.unwrap().delta, 0);
+        runtime
+            .submit_token(
+                "billing",
+                mutation(
+                    "release",
+                    TokenEntryType::Release,
+                    0,
+                    json!({"reserved": 20, "reservation_id": "job"}),
+                ),
+            )
+            .unwrap();
+        let paid = runtime
+            .submit_token(
+                "billing",
+                mutation(
+                    "refund-paid",
+                    TokenEntryType::Cashout,
+                    -100,
+                    json!({"require_full_amount": true}),
+                ),
+            )
+            .unwrap();
+        assert_eq!(paid.entry.unwrap().delta, -100);
+        drop(runtime);
+        let mut restored = ChainRuntime::load(settings).unwrap();
+        let retry = restored
+            .submit_token(
+                "billing",
+                mutation(
+                    "refund-paid",
+                    TokenEntryType::Cashout,
+                    -100,
+                    json!({"require_full_amount": true}),
+                ),
+            )
+            .unwrap();
+        assert!(retry.duplicate);
+        assert_eq!(retry.entry.unwrap().delta, -100);
+        assert_eq!(
+            restored
+                .account_snapshot(&AccountRef::new(AccountScope::User, "alice"))
+                .paid_balance,
+            0
+        );
     }
 
     #[test]
