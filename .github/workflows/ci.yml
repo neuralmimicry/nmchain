@@ -46,21 +46,21 @@ jobs:
       contents: read
       packages: write
     timeout-minutes: 45
-    runs-on: ${{ matrix.runner }}
+    runs-on:
+      - self-hosted
+      - Linux
+      - ${{ matrix.runner_arch }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
-            runner_arch: X64
+          - runner_arch: X64
             variant: amd64
             page_size: 4k
-          - runner: ubuntu-24.04-arm
-            runner_arch: ARM64
+          - runner_arch: ARM64
             variant: arm64-4k
             page_size: 4k
-          - runner: ubuntu-24.04-arm
-            runner_arch: ARM64
+          - runner_arch: ARM64
             variant: arm64-64k-hwe
             page_size: 64k-hwe
     steps:
@@ -126,7 +126,7 @@ jobs:
     name: Publish GHCR image indexes
     needs: [container]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: read
       packages: write
