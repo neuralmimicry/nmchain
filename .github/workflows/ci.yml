@@ -26,6 +26,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Check OCI source labels
+        shell: bash
+        run: |
+          # GHCR links a package to its repo via org.opencontainers.image.source;
+          # every Containerfile/Dockerfile (incl. templates) must carry it.
+          want="org.opencontainers.image.source=\"https://github.com/${GITHUB_REPOSITORY}\""
+          status=0
+          while IFS= read -r f; do
+            grep -qF "$want" "$f" || { echo "::error file=$f::missing $want"; status=1; }
+          done < <(git ls-files | grep -iE '(^|/)(containerfile|dockerfile)[^/]*$|\.(containerfile|dockerfile)(\.j2)?$' | grep -viE '\.(md|py|sh|txt|ya?ml|json)$')
+          exit "$status"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -165,6 +176,8 @@ jobs:
         run: |
           docker buildx imagetools create \
             --tag "${GHCR_IMAGE}:latest" \
+            --annotation "index:org.opencontainers.image.source=https://github.com/neuralmimicry/nmchain" \
+            --annotation "index:org.opencontainers.image.description=Private permissioned blockchain: tamper-evident append-only audit ledger for identity, payment, and token events across the NeuralMimicry platform" \
             --tag "${GHCR_IMAGE}:${GITHUB_SHA}" \
             "${GHCR_IMAGE}:${GITHUB_SHA}-amd64" \
             "${GHCR_IMAGE}:${GITHUB_SHA}-arm64-4k"
