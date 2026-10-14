@@ -34,3 +34,9 @@ EXPOSE 9080
 USER 10001:10001
 
 ENTRYPOINT ["/usr/local/bin/nmchain"]
+
+# OCI metadata (final stage) so GHCR links the package to its source repository.
+LABEL org.opencontainers.image.source="https://github.com/neuralmimicry/nmchain" \
+      org.opencontainers.image.url="https://github.com/neuralmimicry/nmchain" \
+      org.opencontainers.image.description="Private permissioned blockchain: tamper-evident append-only audit ledger for identity, payment, and token events across the NeuralMimicry platform" \
+      org.opencontainers.image.vendor="NeuralMimicry"
