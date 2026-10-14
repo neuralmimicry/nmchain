@@ -57,10 +57,7 @@ jobs:
       contents: read
       packages: write
     timeout-minutes: 45
-    runs-on:
-      - self-hosted
-      - Linux
-      - ${{ matrix.runner_arch }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
